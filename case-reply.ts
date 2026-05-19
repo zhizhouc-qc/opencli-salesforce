@@ -386,8 +386,23 @@ async function inspectCeUpdateModal(page: any): Promise<any> {
         value: norm('value' in el ? el.value : (el.innerText || el.textContent || '')),
       };
     };
-    const modals = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container'))
-      .filter((el) => isRenderable(el) && /case\\s+\\d+|ce update|latest qualcomm progress update/i.test(norm(el.innerText || el.textContent || '')));
+    const roots = [document];
+    for (let ri = 0; ri < roots.length; ri++) {
+      const root = roots[ri];
+      if (!root || !root.querySelectorAll) continue;
+      root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+    }
+    const candidates = [];
+    roots.forEach((root) => {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container, [role="dialog"], .slds-modal, .modal, [class*="modal"], [id*="ceupdate"], [id*="caseupdate"]').forEach((el) => candidates.push(el));
+    });
+    const modals = candidates
+      .filter((el, idx) => candidates.indexOf(el) === idx)
+      .filter((el) => {
+        const text = norm(el.innerText || el.textContent || '');
+        return isRenderable(el) && /case\\s+\\d+|ce update|case update|latest qualcomm progress update|subject tag status|answer given-awaiting feedback/i.test(text);
+      });
     const modal = modals[0] || null;
     if (!modal) return { visible: false };
     const textareas = Array.from(modal.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]'));
@@ -408,6 +423,49 @@ async function inspectCeUpdateModal(page: any): Promise<any> {
       save: save ? toHit(save, 'ce-update-save') : null,
     };
   })()`);
+}
+
+async function dismissEasyWorkTimeout(page: any): Promise<boolean> {
+  const clicked = await page.evaluate(`(() => {
+    const norm = (value) => (value || '').replace(/\\u200b/g, '').replace(/\\s+/g, ' ').trim();
+    const popups = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container, [role="dialog"]'));
+    const popup = popups.find((el) => /timeout to get case information|click\s+ok\s+to\s+refresh/i.test(norm(el.innerText || el.textContent || '')));
+    if (!popup) return false;
+    const buttons = Array.from(popup.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
+    const ok = buttons.find((el) => /^ok$/i.test(norm(el.innerText || el.textContent || el.value || el.getAttribute?.('title') || el.getAttribute?.('aria-label') || ''))) || buttons[0];
+    if (!ok) return false;
+    ok.click();
+    return true;
+  })()`);
+  if (clicked) await page.wait(5);
+  return !!clicked;
+}
+
+async function waitForCeUpdateModalAfterTrigger(page: any): Promise<any> {
+  let modal = await inspectCeUpdateModal(page);
+  if (modal?.visible) return modal;
+  for (let poll = 0; poll < 20; poll++) {
+    await dismissEasyWorkTimeout(page);
+    modal = await inspectCeUpdateModal(page);
+    if (modal?.visible) return modal;
+    await page.wait(1.5);
+  }
+  return modal;
+}
+
+async function openCeUpdateModal(page: any): Promise<any> {
+  let modal = await inspectCeUpdateModal(page);
+  if (modal?.visible) return modal;
+  for (let openTry = 0; openTry < 3 && !modal?.visible; openTry++) {
+    if (page.nativeKeyPress) {
+      try {
+        await page.evaluate('document.body && document.body.focus && document.body.focus()');
+      } catch {}
+      await page.nativeKeyPress('u');
+    }
+    modal = await waitForCeUpdateModalAfterTrigger(page);
+  }
+  return modal;
 }
 
 async function insertCeUpdateText(page: any, text: string): Promise<any> {
@@ -523,8 +581,8 @@ async function setSubjectInModal(page: any, subjectValue: string): Promise<boole
   // Get coordinates and current value of the Subject input field
   const inputCoords = await page.evaluate(`(()=>{
     const norm = (value) => (value || '').replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
-    const modal = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container'))
-      .find((el) => /case\s+\d+|ce update/i.test(norm(el.innerText || el.textContent || '')));
+    const modal = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container, [role="dialog"], .slds-modal, .modal, [class*="modal"], [id*="ceupdate"], [id*="caseupdate"]'))
+      .find((el) => /case\s+\d+|ce update|case update|subject tag status|answer given-awaiting feedback/i.test(norm(el.innerText || el.textContent || '')));
     if (!modal) return null;
     const inputs = Array.from(modal.querySelectorAll('input[type="text"], input:not([type]), textarea'));
     for (const inp of inputs) {
@@ -546,8 +604,8 @@ async function setSubjectInModal(page: any, subjectValue: string): Promise<boole
   await page.wait(0.5);
   // Use execCommand to select all and replace - works with React/LWC
   await page.evaluate(`(()=>{
-    const modal = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container'))
-      .find((el) => /case|ce update/i.test((el.innerText||el.textContent||'')));
+    const modal = Array.from(document.querySelectorAll('.swal2-popup, .swal2-container.ceupdate-container, .swal2-container, [role="dialog"], .slds-modal, .modal, [class*="modal"], [id*="ceupdate"], [id*="caseupdate"]'))
+      .find((el) => /case|ce update|case update|subject tag status|answer given-awaiting feedback/i.test((el.innerText||el.textContent||'')));
     if (!modal) return;
     const inp = modal.querySelector('input[type="text"], input:not([type])');
     if (!inp) return;
@@ -892,8 +950,20 @@ cli({
     for (let attempt = 0; attempt < 6; attempt++) {
       actualCaseNum = await page.evaluate(`(() => {
         const bodyText = document.body ? (document.body.innerText || '') : '';
-        const match = bodyText.match(/\\b(\\d{8})\\b/);
-        return match ? match[1] : null;
+        const wanted = ${JSON.stringify(caseNum)};
+        const expectedId = ${JSON.stringify((caseUrl.match(/\/Case\/([^/]+)\/view/) || [])[1] || '')};
+        if (new RegExp('\\\\b' + wanted + '\\\\b').test(bodyText)) return wanted;
+        if (expectedId && String(location.href || '').includes(expectedId)) return null;
+        const patterns = [
+          /Case\\s+Number\\s*[:#]?\\s*(\\d{8})/i,
+          /Case\\s*#\\s*(\\d{8})/i,
+          /Case\\s*[:#]\\s*(\\d{8})/i,
+        ];
+        for (const pattern of patterns) {
+          const match = bodyText.match(pattern);
+          if (match) return match[1];
+        }
+        return null;
       })()`);
       if (actualCaseNum === caseNum) break;
       await page.wait(2);
@@ -921,24 +991,16 @@ cli({
     })()`);
     await page.wait(1.2);
 
-    // Try to open CE Update modal directly via ew_ceupdate_button
-    await page.evaluate(`(() => {
-      const btn = document.querySelector('.ew_ceupdate_button');
-      if (btn) { btn.click(); return true; }
-      return false;
-    })()`);
-    await page.wait(3);
-
-    let ceUpdateModal = await inspectCeUpdateModal(page);
+    // EasyWork shortcut: pressing "u" opens the CE Update modal. Keep it as the primary path.
+    let ceUpdateModal = await openCeUpdateModal(page);
     if (!ceUpdateModal?.visible) {
-      // One more direct attempt before failing; do not fall back to the generic composer.
+      // Fallback to the original direct EasyWork button click if the shortcut did not open it.
       await page.evaluate(`(() => {
         const btn = document.querySelector('a.ew_ceupdate_button, .ew_ceupdate_button');
         if (btn) { btn.click(); return true; }
         return false;
       })()`);
-      await page.wait(2);
-      ceUpdateModal = await inspectCeUpdateModal(page);
+      ceUpdateModal = await waitForCeUpdateModalAfterTrigger(page);
     }
 
     if (ceUpdateModal?.visible) {
